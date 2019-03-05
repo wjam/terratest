@@ -17,6 +17,7 @@ type RemoteFileSpecification struct {
 	SshUser                string
 	KeyPair                *Ec2Keypair
 	LocalDestinationDir    string //base path where to store downloaded artifacts locally. The final path of each resource will include the ip of the host and the name of the immediate parent folder.
+	UsePrivateIP           bool // whether to connect to the instances via their public IP address or private IP
 }
 
 // FetchContentsOfFileFromInstance looks up the public IP address of the EC2 Instance with the given ID, connects to
@@ -170,16 +171,49 @@ func FetchFilesFromInstanceE(t *testing.T, awsRegion string, sshUserName string,
 		return err
 	}
 
+	return fetchFilesFromInstance(t, publicIp, sshUserName, keyPair, useSudo, remoteDirectory, localDirectory, filenameFilters)
+}
+
+// FetchFilesFromInstanceByPrivateIP looks up the EC2 Instances in the given ASG, looks up the private IPs of those EC2
+// Instances, connects to each Instance via SSH using the given username and Key Pair, downloads the files
+// matching filenameFilters at the given remoteDirectory (using sudo if useSudo is true), and stores the files locally
+// at localDirectory/<privateip>/<remoteFolderName>
+func FetchFilesFromInstanceByPrivateIP(t *testing.T, awsRegion string, sshUserName string, keyPair *Ec2Keypair, instanceID string, useSudo bool, remoteDirectory string, localDirectory string, filenameFilters []string) {
+	err := FetchFilesFromInstanceByPrivateIPE(t, awsRegion, sshUserName, keyPair, instanceID, useSudo, remoteDirectory, localDirectory, filenameFilters)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// FetchFilesFromInstanceE looks up the EC2 Instances in the given ASG, looks up the private IPs of those EC2
+// Instances, connects to each Instance via SSH using the given username and Key Pair, downloads the files
+// matching filenameFilters at the given remoteDirectory (using sudo if useSudo is true), and stores the files locally
+// at localDirectory/<privateip>/<remoteFolderName>
+func FetchFilesFromInstanceByPrivateIPE(t *testing.T, awsRegion string, sshUserName string, keyPair *Ec2Keypair, instanceID string, useSudo bool, remoteDirectory string, localDirectory string, filenameFilters []string) error {
+	ip, err := GetPrivateIpOfEc2InstanceE(t, instanceID, awsRegion)
+
+	if err != nil {
+		return err
+	}
+
+	return fetchFilesFromInstance(t, ip, sshUserName, keyPair, useSudo, remoteDirectory, localDirectory, filenameFilters)
+}
+
+func fetchFilesFromInstance(t *testing.T, ip string, sshUserName string, keyPair *Ec2Keypair, useSudo bool, remoteDirectory string, localDirectory string, filenameFilters []string) error {
 	host := ssh.Host{
-		Hostname:    publicIp,
+		Hostname:    ip,
 		SshUserName: sshUserName,
 		SshKeyPair:  keyPair.KeyPair,
 	}
 
-	finalLocalDestDir := filepath.Join(localDirectory, publicIp, filepath.Base(remoteDirectory))
+	finalLocalDestDir := filepath.Join(localDirectory, ip, filepath.Base(remoteDirectory))
 
 	if !files.FileExists(finalLocalDestDir) {
-		os.MkdirAll(finalLocalDestDir, 0755)
+		err := os.MkdirAll(finalLocalDestDir, 0755)
+		if err != nil {
+			return err
+		}
 	}
 
 	scpOptions := ssh.ScpDownloadOptions{
@@ -206,10 +240,10 @@ func FetchFilesFromAsgs(t *testing.T, awsRegion string, spec RemoteFileSpecifica
 }
 
 // FetchFilesFromAsgsE looks up the EC2 Instances in all the ASGs given in the RemoteFileSpecification,
-// looks up the public IPs of those EC2 Instances, connects to each Instance via SSH using the given
+// looks up the public or private IPs of those EC2 Instances, connects to each Instance via SSH using the given
 // username and Key Pair, downloads the files matching filenameFilters at the given
 // remoteDirectory (using sudo if useSudo is true), and stores the files locally at
-// localDirectory/<publicip>/<remoteFolderName>
+// localDirectory/<ip>/<remoteFolderName>
 func FetchFilesFromAsgsE(t *testing.T, awsRegion string, spec RemoteFileSpecification) error {
 	errorsOccurred := []error{}
 
@@ -221,7 +255,11 @@ func FetchFilesFromAsgsE(t *testing.T, awsRegion string, spec RemoteFileSpecific
 				errorsOccurred = append(errorsOccurred, err)
 			} else {
 				for _, instanceID := range instanceIDs {
-					err = FetchFilesFromInstanceE(t, awsRegion, spec.SshUser, spec.KeyPair, instanceID, spec.UseSudo, curRemoteDir, spec.LocalDestinationDir, fileFilters)
+					if spec.UsePrivateIP {
+						err = FetchFilesFromInstanceByPrivateIPE(t, awsRegion, spec.SshUser, spec.KeyPair, instanceID, spec.UseSudo, curRemoteDir, spec.LocalDestinationDir, fileFilters)
+					} else {
+						err = FetchFilesFromInstanceE(t, awsRegion, spec.SshUser, spec.KeyPair, instanceID, spec.UseSudo, curRemoteDir, spec.LocalDestinationDir, fileFilters)
+					}
 
 					if err != nil {
 						errorsOccurred = append(errorsOccurred, err)
